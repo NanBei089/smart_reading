@@ -9,7 +9,6 @@ from xml.dom.minidom import Document
 
 from langchain_chroma import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
-from numpy.ma.core import ids
 
 from config.setting import QaConfig
 
