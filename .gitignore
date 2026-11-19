@@ -46,6 +46,7 @@ desktop.ini
 
 # ---------- Runtime / generated artifacts ----------
 logs/
+temp/
 *.log
 *.sqlite3
 *.db
