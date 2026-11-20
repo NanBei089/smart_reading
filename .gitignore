@@ -50,3 +50,4 @@ temp/
 *.log
 *.sqlite3
 *.db
+test/
