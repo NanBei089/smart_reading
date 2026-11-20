@@ -1,15 +1,14 @@
 """
 对向量检索后的数据进行重新排序
 """
+import re
 from dataclasses import dataclass
 from typing import Optional, Tuple
-import re
 
 from langchain_community.chat_models import ChatTongyi
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from pymupdf import dictkey_descr
 
 from config.setting import QaConfig
 from querying.query_pormpts import RERANK_PROMPT
@@ -58,6 +57,35 @@ class RerankPipeline:
 
         # 预过滤
         pre_docs = self._filter(recalled_docs)
+        # 对齐向量分数
+        score_map = {doc.page_content: s for doc, s in zip(recalled_docs, vec_scores)}
+
+        # LLM批量精排
+        final_docs, llm_scores = self._llm_rerank_batch(query, pre_docs, top_k=final_top_k)
+
+        # 组装数据
+        evidence_list = []
+        for i, doc in enumerate(final_docs):
+            content = doc.page_content
+            meta = doc.metadata or {}
+            ev = RetrievedEvidence(
+                content=content,
+                source=meta.get("source", "Unknown"),
+                page=meta.get("page"),
+                score=llm_scores[i],
+                vector_score=score_map.get(content, 0.0),
+                llm_score=llm_scores[i]
+            )
+            evidence_list.append(ev)
+        # 格式化上下文
+        context_lines = []
+        for idx, ev in enumerate(evidence_list, 1):
+            page_str = f"第{ev.page + 1}页" if ev.page is not None else "未知页"
+            context_lines.append(f"[证据{idx} | 来源：{ev.source} | {page_str}]\n{ev.content}")
+        context = "\n\n".join(context_lines)
+
+        return evidence_list, context
+
 
     def _filter(self, recalled_docs: list[Document], min_len: int = 40, max_len: int = 2000) -> list[Document]:
         """过滤处理已召回的文档列表"""
@@ -89,54 +117,54 @@ class RerankPipeline:
         """
 
         if not documents:
-            return [],[]
+            return [], []
 
-        #构建批量打分提示词
-        chunks_text=[]
-        for idx,doc in enumerate(documents,1):
-            #截断过长的文本，避免超出上下文
-            content=doc.page_content[:1000] if len(doc.page_content)>1000 else doc.page_content
+        # 构建批量打分提示词
+        chunks_text = []
+        for idx, doc in enumerate(documents, 1):
+            # 截断过长的文本，避免超出上下文
+            content = doc.page_content[:1000] if len(doc.page_content) > 1000 else doc.page_content
             chunks_text.append(f"候选片段{idx}:\n{content}")
 
-        chunks_text="\n\n".join(chunks_text)
+        chunks_text = "\n\n".join(chunks_text)
 
         try:
-            #批量请求
-            result_text=self._batch_chain.invoke({
-                "question":question,
-                "chunks":chunks_text
+            # 批量请求
+            result_text = self._batch_chain.invoke({
+                "question": question,
+                "chunks": chunks_text
             })
             """
              '候选片段 1: 3.0  \n候选片段 2: 5.0  \n候选片段 3: 0.0  
             """
-            #解析模型结果
-            #1.解析分数
-            scores=self._parse_batch_scores(result_text,len(documents))
+            # 解析模型结果
+            # 1.解析分数
+            scores = self._parse_batch_scores(result_text, len(documents))
 
-            #限制分数范围
-            scores=[max(0.0,min(10,s)) for s in scores]
+            # 限制分数范围
+            scores = [max(0.0, min(10, s)) for s in scores]
 
-            #按分数降序排行
-            scored=list(zip(scores,documents))
-            scored.sort(key=lambda x:x[0],reverse=True)
+            # 按分数降序排行
+            scored = list(zip(scores, documents))
+            scored.sort(key=lambda x: x[0], reverse=True)
 
-            docs=[d for _,d in scored[:top_k]]
-            final_scores=[s for s,_ in scored[:top_k]]
+            docs = [d for _, d in scored[:top_k]]
+            final_scores = [s for s, _ in scored[:top_k]]
 
-            return docs,final_scores
+            return docs, final_scores
 
-        except Exception as e :
+        except Exception as e:
             print(f"打分失败:{e}")
-            return [],[]
+            return [], []
 
-    def _parse_batch_scores(self,text:str,expected_count:int)->list[float]:
+    def _parse_batch_scores(self, text: str, expected_count: int) -> list[float]:
         """
         解析批量打分结果
         :param text: llm返回文本
         :param expected_count: 期望分数的数量
         :return: 分数列表
         """
-        scores=[]
+        scores = []
 
         # 尝试标准格式：候选片段 1: 8.5 或 候选片段1:8.5
         pattern = r'候选片段\s*(\d+)[:：]\s*(\d+(?:\.\d+)?)'
